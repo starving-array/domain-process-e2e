@@ -46,29 +46,9 @@ def create_app(
     task_manager: TaskManager | None = None
     scheduler: RefreshScheduler | None = None
 
-    if enable_worker_pool:
-        # Use Phase 9 task handler if no custom handler provided
-        actual_task_handler = task_handler or create_phase9_task_handler(app_settings)
-        
-        worker_pool = WorkerPool(
-            session_maker=session_maker,
-            settings=app_settings,
-            task_handler=actual_task_handler,
-        )
-
-        task_manager = TaskManager(
-            session_maker=session_maker,
-            settings=app_settings,
-            worker_pool=worker_pool,
-        )
-
-        # Create scheduler with worker pool reference for backpressure
-        if enable_scheduler:
-            scheduler = RefreshScheduler(
-                session_maker=session_maker,
-                settings=app_settings,
-                worker_pool=worker_pool,
-            )
+    # Create singleton DomainLockManager for Redis locking across all workers
+    from domain_processing_service.domain_lock import DomainLockManager
+    domain_lock_manager = DomainLockManager(app_settings)
 
     # Create metrics collector
     metrics = MetricsCollector()
@@ -86,9 +66,11 @@ def create_app(
     shutdown_coordinator._scheduler = None  # Will be set after scheduler creation
 
     if enable_worker_pool:
-        # Use Phase 9 task handler if no custom handler provided
-        actual_task_handler = task_handler or create_phase9_task_handler(app_settings)
-        
+        # Use Phase 9 task handler with shared domain_lock_manager if no custom handler provided
+        actual_task_handler = task_handler or create_phase9_task_handler(
+            app_settings, domain_lock_manager=domain_lock_manager
+        )
+
         worker_pool = WorkerPool(
             session_maker=session_maker,
             settings=app_settings,
@@ -118,34 +100,43 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         log_event(logger, "app.startup.started")
         await app_database.connect()
-        
+        try:
+            await domain_lock_manager.connect()
+        except Exception as e:
+            logger.warning("Redis connection failed during startup: %s", e)
+
         if worker_pool is not None:
             await worker_pool.start()
-        
+
         if task_manager is not None:
             await task_manager.start()
-        
+
         if scheduler is not None:
             await scheduler.start()
-        
+
         # Install signal handlers after startup
         shutdown_coordinator.install_signal_handlers()
-        
+
         log_event(logger, "app.startup.completed", dependency="postgresql")
         try:
             yield
         finally:
             log_event(logger, "app.shutdown.started")
             await shutdown_coordinator.shutdown(database=app_database)
+            try:
+                await domain_lock_manager.close()
+            except Exception as e:
+                logger.warning("Redis close error during shutdown: %s", e)
 
     app = FastAPI(title=app_settings.app_name, lifespan=lifespan)
-    
+
     # Add metrics middleware (must be before RequestIDMiddleware to capture all requests)
     app.add_middleware(MetricsMiddleware)
     app.add_middleware(RequestIDMiddleware)
-    
+
     app.state.settings = app_settings
     app.state.database = app_database
+    app.state.domain_lock_manager = domain_lock_manager
     app.state.shutdown_coordinator = shutdown_coordinator
     if worker_pool is not None:
         app.state.worker_pool = worker_pool

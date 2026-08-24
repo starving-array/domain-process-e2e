@@ -36,8 +36,18 @@ class DatabaseLifecycle(Protocol):
 class SqlAlchemyDatabase:
     def __init__(self, settings: AppSettings) -> None:
         self._settings = settings
-        self._engine: AsyncEngine | None = None
-        self._session_maker: async_sessionmaker[AsyncSession] | None = None
+        self._engine: AsyncEngine | None = create_async_engine(
+            self._settings.database_url,
+            pool_pre_ping=True,
+            pool_size=self._settings.db_pool_size,
+            max_overflow=self._settings.db_max_overflow,
+            pool_timeout=self._settings.db_pool_timeout_seconds,
+        )
+        self._session_maker: async_sessionmaker[AsyncSession] | None = async_sessionmaker(
+            bind=self._engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
 
     @property
     def engine(self) -> AsyncEngine:
@@ -55,18 +65,6 @@ class SqlAlchemyDatabase:
 
     async def connect(self) -> None:
         log_event(logger, "database.connection.started", dependency="postgresql")
-        self._engine = create_async_engine(
-            self._settings.database_url,
-            pool_pre_ping=True,
-            pool_size=self._settings.db_pool_size,
-            max_overflow=self._settings.db_max_overflow,
-            pool_timeout=self._settings.db_pool_timeout_seconds,
-        )
-        self._session_maker = async_sessionmaker(
-            bind=self._engine,
-            class_=AsyncSession,
-            expire_on_commit=False,
-        )
         try:
             await self._ping()
         except Exception:

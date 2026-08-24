@@ -33,6 +33,24 @@ class DomainRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_normalized_domains(
+        self, normalized_domains: list[str]
+    ) -> list[Domain]:
+        """Retrieve multiple Domains by their normalized domain names in one bulk query."""
+        if not normalized_domains:
+            return []
+        stmt = select(Domain).where(Domain.normalized_domain.in_(normalized_domains))
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def create_batch(self, domains: list[Domain]) -> list[Domain]:
+        """Insert multiple Domains in a single batch."""
+        if not domains:
+            return []
+        self._session.add_all(domains)
+        await self._session.flush()
+        return domains
+
     async def get_or_create(self, normalized_domain: str) -> Domain:
         """Get an existing Domain or create a new one."""
         domain = await self.get_by_normalized_domain(normalized_domain)
@@ -78,7 +96,7 @@ class DomainRepository:
     ) -> tuple[Domain, bool]:
         """
         Get or create a Domain, reactivating if inactive.
-        
+
         Returns:
             Tuple of (domain, was_reactivated)
         """
@@ -110,5 +128,14 @@ class DomainRepository:
         """Delete DomainDetail for a domain (used during reactivation)."""
         from sqlalchemy import delete
         stmt = delete(DomainDetail).where(DomainDetail.domain_id == domain_id)
+        await self._session.execute(stmt)
+        await self._session.flush()
+
+    async def clear_domain_details_batch(self, domain_ids: list[uuid.UUID]) -> None:
+        """Delete DomainDetail records for multiple domains in one query."""
+        if not domain_ids:
+            return
+        from sqlalchemy import delete
+        stmt = delete(DomainDetail).where(DomainDetail.domain_id.in_(domain_ids))
         await self._session.execute(stmt)
         await self._session.flush()

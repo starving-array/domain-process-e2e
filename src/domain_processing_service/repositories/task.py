@@ -251,8 +251,6 @@ class TaskRepository:
 
         recovered = []
         for task in tasks:
-            # Increment attempt count
-            task.attempts += 1
             task.updated_at = now
 
             # Check if we've exceeded max attempts
@@ -283,7 +281,7 @@ class TaskRepository:
             await self._session.flush()
 
         return recovered
-    
+
     async def update_status(
         self,
         task_id: uuid.UUID,

@@ -310,6 +310,12 @@ class WorkerPool:
         self._settings = settings
         self._task_handler = task_handler
 
+        # If the task handler supports session_maker attachment (e.g. phase9 handler),
+        # provide it so the handler can create its own short-lived DB sessions.
+        attach = getattr(task_handler, '_attach_session_maker', None)
+        if attach is not None:
+            attach(session_maker)
+
         # Create the bounded queue
         self._queue: BoundedQueue[Task] = BoundedQueue(
             capacity=settings.worker_queue_capacity
@@ -405,36 +411,60 @@ class WorkerPool:
 
 def create_phase9_task_handler(
     settings: AppSettings,
+    domain_lock_manager: Any = None,
 ) -> Callable[[Task, AsyncSession], Awaitable[None]]:
     """
     Create a Phase 9 task handler that performs actual domain processing.
-    
+
     This replaces the mock handler from Phase 8 with actual domain processing logic.
+
+    The returned handler accepts (task, session) for backward compatibility with
+    the worker interface, but the DomainProcessor manages its own short-lived
+    database sessions internally so that PostgreSQL connections are not held
+    during slow external I/O (DNS resolution, HTTP probing).
     """
     from domain_processing_service.domain_processor import DomainProcessor
-    
+
+    # Capture session_maker: it will be set by _attach_session_maker() below.
+    _session_maker_ref: list[async_sessionmaker[AsyncSession] | None] = [None]
+
     def phase9_task_handler(task: Task, session: AsyncSession) -> Awaitable[None]:
         """
         Phase 9 task handler - performs actual domain processing.
+
+        The session parameter is accepted for interface compatibility but is
+        not used. DomainProcessor creates its own short-lived sessions via
+        session_maker to avoid holding DB connections during external I/O.
         """
-        # Create domain processor
+        session_maker = _session_maker_ref[0]
+        if session_maker is None:
+            # Fallback: derive session_maker from the passed session's bind.
+            # This path should not normally be reached in production.
+            session_maker = async_sessionmaker(
+                bind=session.get_bind(),
+                class_=AsyncSession,
+                expire_on_commit=False,
+            )
+
+        # Create domain processor with session_maker and shared domain_lock_manager
         processor = DomainProcessor(
             settings=settings,
-            session=session,
-            domain_lock_manager=None,  # Will be created inside
+            session_maker=session_maker,
+            domain_lock_manager=domain_lock_manager,
         )
-        
+
         async def _process() -> None:
             try:
                 await processor.process_task(task)
-                
-                # The processor updates the task status directly
-                # We just need to ensure the session is flushed
-                await session.flush()
-                
             finally:
                 await processor.close()
-        
+
         return _process()
-    
+
+    def _attach_session_maker(sm: async_sessionmaker[AsyncSession]) -> None:
+        """Attach the session_maker after handler creation."""
+        _session_maker_ref[0] = sm
+
+    phase9_task_handler._attach_session_maker = _attach_session_maker  # type: ignore[attr-defined]
+
     return phase9_task_handler

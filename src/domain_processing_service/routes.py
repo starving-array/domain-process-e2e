@@ -227,7 +227,7 @@ async def create_job(
     try:
         if idempotency_key:
             request_hash = _compute_request_hash(payload)
-            
+
             try:
                 async with session.begin_nested():
                     savepoint_job_id = uuid.uuid4()
@@ -238,7 +238,7 @@ async def create_job(
                         updated_at=now,
                     )
                     await job_repo.create(job)
-                    
+
                     record = IdempotencyRecord(
                         id=uuid.uuid4(),
                         client_id=effective_client_id,
@@ -268,15 +268,46 @@ async def create_job(
             job_id_to_use = uuid.uuid4()
             job = Job(id=job_id_to_use, status=TaskStatus.PENDING, created_at=now, updated_at=now)
             await job_repo.create(job)
-            
+
         if not is_idempotent_replay:
-            # Create tasks only if it's a new job
+            # Bulk domain lookup and creation
+            valid_domain_strs = [norm_d.value for norm_d in final_valid_domains]
+            invalid_domain_strs = [
+                norm_d.value if norm_d.value else "invalid" for norm_d in invalid_domains
+            ]
+            all_domain_strs = list(set(valid_domain_strs + invalid_domain_strs))
+
+            existing_domains = await domain_repo.get_by_normalized_domains(all_domain_strs)
+            domain_map: dict[str, Domain] = {
+                d.normalized_domain: d for d in existing_domains
+            }
+
+            # Create missing domains in bulk
+            new_domains = []
+            for d_str in all_domain_strs:
+                if d_str not in domain_map:
+                    new_d = Domain(
+                        id=uuid.uuid4(),
+                        normalized_domain=d_str,
+                        is_active=True,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    new_domains.append(new_d)
+                    domain_map[d_str] = new_d
+
+            if new_domains:
+                await domain_repo.create_batch(new_domains)
+
+            # Reactivate any inactive domains for valid domains
+            reactivated_domain_ids: list[uuid.UUID] = []
             for norm_domain in final_valid_domains:
-                domain, was_reactivated = await domain_repo.get_or_create_with_reactivation(
-                    norm_domain.value
-                )
-                
-                if was_reactivated:
+                domain = domain_map[norm_domain.value]
+                if not domain.is_active:
+                    domain.is_active = True
+                    domain.deactivated_at = None
+                    domain.updated_at = now
+                    reactivated_domain_ids.append(domain.id)
                     log_event(
                         logger,
                         "domain.reactivated",
@@ -285,8 +316,15 @@ async def create_job(
                         domain_id=str(domain.id),
                         domain=domain.normalized_domain,
                     )
-                    await domain_repo.clear_domain_detail(domain.id)
-                
+
+            if reactivated_domain_ids:
+                await domain_repo.clear_domain_details_batch(reactivated_domain_ids)
+                await session.flush()
+
+            # Build all tasks in memory and bulk insert
+            tasks_to_create: list[Task] = []
+            for norm_domain in final_valid_domains:
+                domain = domain_map[norm_domain.value]
                 task = Task(
                     id=uuid.uuid4(),
                     job_id=job_id_to_use,
@@ -298,18 +336,16 @@ async def create_job(
                     created_at=now,
                     updated_at=now,
                 )
-                await task_repo.create(task)
+                tasks_to_create.append(task)
 
             for norm_domain in invalid_domains:
                 domain_value = norm_domain.value if norm_domain.value else "invalid"
-                domain = await domain_repo.get_or_create(domain_value)
-
+                domain = domain_map[domain_value]
                 error_payload = {
                     "code": "VALIDATION_ERROR",
                     "message": norm_domain.error or "Domain validation failed",
                     "retryable": False,
                 }
-
                 task = Task(
                     id=uuid.uuid4(),
                     job_id=job_id_to_use,
@@ -322,7 +358,10 @@ async def create_job(
                     created_at=now,
                     updated_at=now,
                 )
-                await task_repo.create(task)
+                tasks_to_create.append(task)
+
+            if tasks_to_create:
+                await task_repo.create_batch(tasks_to_create)
 
         await session.commit()
 
@@ -359,7 +398,7 @@ async def create_job(
             status_code=status.HTTP_200_OK,
             content={"jobId": str(job_id_to_use), "status": TaskStatus.PENDING.value},
         )
-        
+
     log_event(
         logger,
         "job.creation.committed",

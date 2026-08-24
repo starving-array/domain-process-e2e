@@ -1,6 +1,6 @@
 import os
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 from alembic.config import Config
 from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from alembic import command
 
@@ -56,6 +57,23 @@ def reset_phase2_schema() -> None:
             connection.execute(text("DROP TYPE IF EXISTS task_status CASCADE"))
     finally:
         engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+async def _isolate_migrations_from_async_pool(
+    async_engine: AsyncEngine,
+) -> AsyncIterator[None]:
+    """Dispose pooled async connections before and after destructive migration tests.
+
+    When migrations drop and recreate tables/enums, existing asyncpg connections in the
+    shared async_engine pool retain stale OID codecs and descriptors. Disposing the pool
+    forces subsequent operations to create fresh asyncpg connections with updated schema OIDs.
+    """
+    await async_engine.dispose()
+    try:
+        yield
+    finally:
+        await async_engine.dispose()
 
 
 @pytest.fixture()
