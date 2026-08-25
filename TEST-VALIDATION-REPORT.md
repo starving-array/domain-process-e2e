@@ -59,9 +59,9 @@ All technical findings are classified according to direct evidentiary sources:
 ## 5. DNS Architecture & Verification
 
 ### Code Default vs Runtime Configuration
-- `[CODE VERIFIED]` **Configured Code Default:** `dns_nameservers: list[str] = ["8.8.8.8", "1.1.1.1", "8.8.4.4"]` in [`config.py`](file:///C:/Users/lovea/Documents/project/domainProj/src/domain_processing_service/config.py#L32).
+- `[CODE VERIFIED]` **Configured Code Default:** `dns_nameservers: list[str] = ["8.8.8.8", "1.1.1.1", "8.8.4.4"]` in [`config.py`](./src/domain_processing_service/config.py).
 - `[LIVE VERIFIED]` **E2E Runtime Configuration:** `DOMAIN_PROCESSING_DNS_NAMESERVERS="8.8.8.8,1.1.1.1"`.
-- `[CODE VERIFIED]` **Resolver Construction:** `self._resolver = aiodns.DNSResolver(nameservers=nameservers)` in [`dns.py:44-48`](file:///C:/Users/lovea/Documents/project/domainProj/src/domain_processing_service/dns.py#L44-L48).
+- `[CODE VERIFIED]` **Resolver Construction:** `self._resolver = aiodns.DNSResolver(nameservers=nameservers)` in [`dns.py:44-48`](./src/domain_processing_service/dns.py).
 
 ### Real DNS Resolution Check (Unmocked)
 Real upstream DNS resolutions were performed using `DnsResolver` without mocks:
@@ -69,7 +69,7 @@ Real upstream DNS resolutions were performed using `DnsResolver` without mocks:
 2. `[LIVE VERIFIED]` **Nonexistent Domain (`audit-nonexistent-...invalid`):** Low-level resolver raised `aiodns.error.DNSError(4, 'Domain name not found')` (`ARES_ENOTFOUND`).
 
 ### C-ARES Error Code Semantic Mapping
-`[CODE VERIFIED]` & `[TEST VERIFIED]` Defined in [`dns.py:178-204`](file:///C:/Users/lovea/Documents/project/domainProj/src/domain_processing_service/dns.py#L178-L204):
+`[CODE VERIFIED]` & `[TEST VERIFIED]` Defined in [`dns.py:178-204`](./src/domain_processing_service/dns.py):
 - `ARES_ENOTFOUND` (`4`) $\rightarrow$ `"permanent"` (Domain does not exist)
 - `ARES_ENODATA` (`1`) $\rightarrow$ `"permanent"` (No A/AAAA records found)
 - `ARES_ETIMEOUT` (`12`) $\rightarrow$ `"retryable"` (Upstream network timeout)
@@ -129,7 +129,7 @@ Real upstream DNS resolutions were performed using `DnsResolver` without mocks:
 ## 9. Worker & Connection-Pool Architecture
 
 `[CODE VERIFIED]` & `[LOG VERIFIED]`
-In [`worker.py:263-280`](file:///C:/Users/lovea/Documents/project/domainProj/src/domain_processing_service/worker/worker.py#L263-L280), `Worker._process_task()` inspects `getattr(self._task_handler, "_attach_session_maker", None)`.
+In [`worker.py:263-280`](./src/domain_processing_service/worker/worker.py), `Worker._process_task()` inspects `getattr(self._task_handler, "_attach_session_maker", None)`.
 - **Phase 9 Handler Path:** Invokes `await self._task_handler(task, None)` without checking out an outer session.
 - **Persistence Sessions:** `DomainProcessor` opens independent, short-lived sessions strictly during database read/write phases.
 - **Pool Safety:** PostgreSQL connections are not held open during external DNS resolution or HTTP probing.
@@ -139,7 +139,7 @@ In [`worker.py:263-280`](file:///C:/Users/lovea/Documents/project/domainProj/src
 ## 10. HTTP Probe Behavior
 
 `[CODE VERIFIED]` & `[LIVE VERIFIED]`
-In [`http_client.py:28-30`](file:///C:/Users/lovea/Documents/project/domainProj/src/domain_processing_service/http_client.py#L28-L30):
+In [`http_client.py:28-30`](./src/domain_processing_service/http_client.py):
 ```python
 @property
 def is_success(self) -> bool:
@@ -341,7 +341,7 @@ ENVIRONMENT ISOLATION:
 AUTOMATED REGRESSION SUITE:
     PASS (208/208 passing)
 
-COMMIT READINESS:
-    READY FOR COMMIT (AWAITING USER CONFIRMATION)
+VALIDATION STATUS:
+    VALIDATION COMPLETE (EVIDENCE COLLECTED PRIOR TO FINAL COMMIT/PUSH)
 ============================================================
 ```

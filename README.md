@@ -307,5 +307,5 @@ python -m pytest tests/test_phase14.py -v
 The following root-level documentation files are available in this repository:
 
 - 📘 **[Architecture & System Design](./ARCHITECTURE.md)** — Detailed component design, data models, concurrency controls, and SSRF security.
-- 🛠️ **[Setup & Developer Guide](./SETUP.md)** — Comprehensive installation guide, Docker configuration, troubleshooting, and full 27-variable configuration reference.
+- 🛠️ **[Setup & Developer Guide](./SETUP.md)** — Comprehensive installation guide, Docker configuration, troubleshooting, and full 28-variable configuration reference.
 - 📋 **[Engineering Test & Validation Report](./TEST-VALIDATION-REPORT.md)** — Comprehensive evidence-based validation report covering automated test suites, unmocked DNS resolution, HTTP redirect observation, database persistence proofs, and environment isolation.
