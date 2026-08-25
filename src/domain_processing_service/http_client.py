@@ -8,6 +8,7 @@ import httpx
 
 from domain_processing_service.config import AppSettings
 from domain_processing_service.ip_validator import IpValidator
+from domain_processing_service.logging import log_event
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class HttpResult:
     
     @property
     def is_success(self) -> bool:
-        return self.error is None and 200 <= self.status_code < 300
+        return self.error is None and 200 <= self.status_code < 400
     
     @property
     def is_client_error(self) -> bool:
@@ -148,11 +149,14 @@ class HttpClient:
                 # Convert headers to dict (filter out sensitive ones)
                 safe_headers = self._filter_headers(dict(response.headers))
                 
-                logger.info(
-                    "HTTP probe completed for %s: status=%d, time=%dms",
-                    domain,
-                    response.status_code,
-                    response_time_ms,
+                log_event(
+                    logger,
+                    "http_client.probe_completed",
+                    level=logging.INFO,
+                    domain=domain,
+                    status_code=response.status_code,
+                    duration_ms=response_time_ms,
+                    validated_ip=validated_ip,
                 )
                 
                 return HttpResult(
@@ -166,32 +170,66 @@ class HttpClient:
                 
             except httpx.TimeoutException as e:
                 last_error = f"Timeout: {e}"
-                logger.warning("HTTP probe timeout for %s via %s: %s", domain, url, e)
+                log_event(
+                    logger,
+                    "http_client.probe_failed",
+                    level=logging.WARNING,
+                    domain=domain,
+                    url=url,
+                    error=str(e),
+                    error_type="TimeoutException",
+                )
                 continue  # Try next URL (HTTPS -> HTTP)
                 
             except httpx.ConnectError as e:
                 last_error = f"Connection failed: {e}"
-                logger.warning("HTTP connection failed for %s via %s: %s", domain, url, e)
+                log_event(
+                    logger,
+                    "http_client.probe_failed",
+                    level=logging.WARNING,
+                    domain=domain,
+                    url=url,
+                    error=str(e),
+                    error_type="ConnectError",
+                )
                 continue
                 
             except httpx.TooManyRedirects as e:
                 last_error = f"Too many redirects: {e}"
-                logger.warning("Too many redirects for %s: %s", domain, e)
+                log_event(
+                    logger,
+                    "http_client.probe_failed",
+                    level=logging.WARNING,
+                    domain=domain,
+                    url=url,
+                    error=str(e),
+                    error_type="TooManyRedirects",
+                )
                 break  # Don't retry on redirect errors
                 
             except httpx.RequestError as e:
                 last_error = f"Request error: {e}"
-                logger.warning("HTTP request error for %s via %s: %s", domain, url, e)
+                log_event(
+                    logger,
+                    "http_client.probe_failed",
+                    level=logging.WARNING,
+                    domain=domain,
+                    url=url,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
                 continue
                 
             except Exception as e:
                 last_error = f"Unexpected error: {e}"
-                logger.error(
-                    "Unexpected error probing %s via %s: %s",
-                    domain,
-                    url,
-                    e,
-                    exc_info=True,
+                log_event(
+                    logger,
+                    "http_client.probe_failed",
+                    level=logging.ERROR,
+                    domain=domain,
+                    url=url,
+                    error=str(e),
+                    error_type=type(e).__name__,
                 )
                 continue
         

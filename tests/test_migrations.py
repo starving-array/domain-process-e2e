@@ -11,9 +11,15 @@ from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from alembic import command
+from tests.conftest import (
+    assert_safe_test_database_url,
+    ensure_test_database_exists,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TEST_DATABASE_URL = "postgresql+psycopg2://user:password@localhost:5432/domain_processing"
+DEFAULT_TEST_DATABASE_URL = (
+    "postgresql+psycopg2://user:password@127.0.0.1:5432/domain_processing_test"
+)
 REQUIRED_TABLES = {"job", "task", "domain", "domain_detail", "idempotency_record"}
 REQUIRED_INDEXES = {
     "idx_tasks_claim": ("task", ("status", "next_attempt_at", "type"), False),
@@ -26,7 +32,9 @@ REQUIRED_INDEXES = {
 
 
 def get_test_database_url() -> str:
-    return os.environ.get("DOMAIN_PROCESSING_TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+    url = os.environ.get("DOMAIN_PROCESSING_TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
+    assert_safe_test_database_url(url)
+    return url
 
 
 def alembic_config() -> Config:
@@ -36,7 +44,9 @@ def alembic_config() -> Config:
 
 
 def reset_phase2_schema() -> None:
-    engine = create_engine(get_test_database_url())
+    test_url = get_test_database_url()
+    assert_safe_test_database_url(test_url)
+    engine = create_engine(test_url)
     try:
         with engine.begin() as connection:
             connection.execute(
@@ -78,6 +88,8 @@ async def _isolate_migrations_from_async_pool(
 
 @pytest.fixture()
 def migration_test_database() -> Iterator[Engine]:
+    ensure_test_database_exists()
+    assert_safe_test_database_url(get_test_database_url())
     config = alembic_config()
     reset_phase2_schema()
     command.upgrade(config, "head")
@@ -89,6 +101,7 @@ def migration_test_database() -> Iterator[Engine]:
             engine.dispose()
     finally:
         # Re-upgrade to leave database in migrated state for subsequent tests
+        assert_safe_test_database_url(get_test_database_url())
         command.upgrade(config, "head")
 
 

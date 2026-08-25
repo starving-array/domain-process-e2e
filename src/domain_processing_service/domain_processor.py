@@ -94,6 +94,7 @@ class DomainProcessor:
             ProcessingResult with status and any error information
         """
         task_id = str(task.id)
+        job_id = str(task.job_id) if task.job_id else None
         domain_id = task.domain_id
 
         log_event(
@@ -101,6 +102,7 @@ class DomainProcessor:
             "domain_processing.started",
             level=logging.INFO,
             task_id=task_id,
+            job_id=job_id,
             domain_id=str(domain_id),
             task_type=task.type.value,
             attempt=task.attempts,
@@ -141,6 +143,8 @@ class DomainProcessor:
                 "domain_processing.domain_resolved",
                 level=logging.INFO,
                 task_id=task_id,
+                job_id=job_id,
+                domain_id=str(domain_id),
                 domain=normalized_domain,
             )
 
@@ -150,6 +154,8 @@ class DomainProcessor:
                     "domain_processing.fresh_detail_reused",
                     level=logging.INFO,
                     task_id=task_id,
+                    job_id=job_id,
+                    domain_id=str(domain_id),
                     domain=normalized_domain,
                 )
 
@@ -165,6 +171,8 @@ class DomainProcessor:
                 "domain_processing.needs_processing",
                 level=logging.INFO,
                 task_id=task_id,
+                job_id=job_id,
+                domain_id=str(domain_id),
                 domain=normalized_domain,
             )
 
@@ -190,6 +198,8 @@ class DomainProcessor:
                             "domain_processing.lock_contention",
                             level=logging.INFO,
                             task_id=task_id,
+                            job_id=job_id,
+                            domain_id=str(domain_id),
                             domain=normalized_domain,
                         )
                         # Lock contention - reschedule task
@@ -217,6 +227,8 @@ class DomainProcessor:
                             "domain_processing.fresh_after_lock",
                             level=logging.INFO,
                             task_id=task_id,
+                            job_id=job_id,
+                            domain_id=str(domain_id),
                             domain=normalized_domain,
                         )
                         await self._write_complete_task(task_id, TaskStatus.COMPLETED)
@@ -230,12 +242,24 @@ class DomainProcessor:
                         "domain_processing.lock_acquired",
                         level=logging.INFO,
                         task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
                         domain=normalized_domain,
                     )
 
                     # ── EXTERNAL I/O (no DB connection held) ───────────
 
                     # Step 5: DNS Resolution
+                    log_event(
+                        logger,
+                        "domain_processing.dns_started",
+                        level=logging.INFO,
+                        task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
+                        domain=normalized_domain,
+                        attempt=task.attempts,
+                    )
                     dns_result = await self._resolve_dns(normalized_domain, task_id)
 
                     if not dns_result.is_success:
@@ -245,9 +269,22 @@ class DomainProcessor:
 
                     log_event(
                         logger,
+                        "domain_processing.dns_succeeded",
+                        level=logging.INFO,
+                        task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
+                        domain=normalized_domain,
+                        ips_v4=len(dns_result.ips_v4),
+                        ips_v6=len(dns_result.ips_v6),
+                    )
+                    log_event(
+                        logger,
                         "domain_processing.dns_resolved",
                         level=logging.INFO,
                         task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
                         domain=normalized_domain,
                         ips_v4=len(dns_result.ips_v4),
                         ips_v6=len(dns_result.ips_v6),
@@ -262,6 +299,8 @@ class DomainProcessor:
                             "domain_processing.ssrf_rejected",
                             level=logging.WARNING,
                             task_id=task_id,
+                            job_id=job_id,
+                            domain_id=str(domain_id),
                             domain=normalized_domain,
                             rejected_ip=ip_validation.ip,
                             reason=ip_validation.reason,
@@ -284,11 +323,23 @@ class DomainProcessor:
                         "domain_processing.ip_validated",
                         level=logging.INFO,
                         task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
                         domain=normalized_domain,
                         validated_ip=ip_validation.ip,
                     )
 
                     # Step 7: HTTP/HTTPS Probing
+                    log_event(
+                        logger,
+                        "domain_processing.http_started",
+                        level=logging.INFO,
+                        task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
+                        domain=normalized_domain,
+                        validated_ip=ip_validation.ip,
+                    )
                     http_result = await self._http_client.probe(
                         domain=normalized_domain,
                         validated_ip=ip_validation.ip,
@@ -302,9 +353,22 @@ class DomainProcessor:
 
                     log_event(
                         logger,
+                        "domain_processing.http_succeeded",
+                        level=logging.INFO,
+                        task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
+                        domain=normalized_domain,
+                        status_code=http_result.status_code,
+                        response_time_ms=http_result.response_time_ms,
+                    )
+                    log_event(
+                        logger,
                         "domain_processing.http_completed",
                         level=logging.INFO,
                         task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
                         domain=normalized_domain,
                         status_code=http_result.status_code,
                         response_time_ms=http_result.response_time_ms,
@@ -339,6 +403,8 @@ class DomainProcessor:
                         "domain_processing.completed",
                         level=logging.INFO,
                         task_id=task_id,
+                        job_id=job_id,
+                        domain_id=str(domain_id),
                         domain=normalized_domain,
                         duration_ms=duration_ms,
                     )
@@ -355,7 +421,16 @@ class DomainProcessor:
                 pass
 
         except Exception as e:
-            logger.error("Error processing task %s: %s", task_id, e, exc_info=True)
+            log_event(
+                logger,
+                "domain_processing.failed",
+                level=logging.ERROR,
+                task_id=task_id,
+                job_id=job_id,
+                domain_id=str(domain_id),
+                error=str(e),
+                error_type=type(e).__name__,
+            )
 
             # Determine if error is retryable
             error_category = self._classify_exception(e)
@@ -672,7 +747,43 @@ class DomainProcessor:
         if task is not None:
             task.status = status
             task.updated_at = datetime.now(UTC)
-            await task_repo._session.flush()
+            await self._check_and_update_job_status(task_repo._session, task.job_id)
+    async def _check_and_update_job_status(
+        self, session: AsyncSession, job_id: uuid.UUID | None
+    ) -> None:
+        """Check if all tasks belonging to a job are terminal and update Job.status."""
+        if job_id is None:
+            return
+
+        from sqlalchemy import func, select
+        from domain_processing_service.models import Job, Task
+
+        # Lock the Job row to serialize the completion evaluation across concurrent workers
+        job_stmt = select(Job).where(Job.id == job_id).with_for_update()
+        job = (await session.execute(job_stmt)).scalar_one_or_none()
+        if job is None:
+            return
+
+        await session.flush()
+
+        stmt = (
+            select(func.count())
+            .select_from(Task)
+            .where(
+                Task.job_id == job_id,
+                Task.status.in_([TaskStatus.PENDING, TaskStatus.PROCESSING]),
+            )
+        )
+        non_terminal_count = (await session.execute(stmt)).scalar() or 0
+
+        if non_terminal_count == 0:
+            if job.status != TaskStatus.COMPLETED:
+                job.status = TaskStatus.COMPLETED
+                job.updated_at = datetime.now(UTC)
+        else:
+            if job.status == TaskStatus.PENDING:
+                job.status = TaskStatus.PROCESSING
+                job.updated_at = datetime.now(UTC)
 
     async def _write_complete_task(self, task_id: str, status: TaskStatus) -> None:
         """Open a short session to mark task as completed."""
@@ -682,6 +793,7 @@ class DomainProcessor:
             if task is not None:
                 task.status = status
                 task.updated_at = datetime.now(UTC)
+                await self._check_and_update_job_status(session, task.job_id)
             await session.commit()
 
     async def _write_fail_task(self, task_id: str, error: str, category: str) -> ProcessingResult:
@@ -697,6 +809,18 @@ class DomainProcessor:
                     "message": error,
                     "retryable": category == "retryable",
                 }
+                log_event(
+                    logger,
+                    "domain_processing.failed",
+                    level=logging.WARNING if category == "retryable" else logging.ERROR,
+                    task_id=task_id,
+                    job_id=str(task.job_id) if task.job_id else None,
+                    domain_id=str(task.domain_id),
+                    error=error,
+                    error_category=category,
+                    error_code=category.upper() + "_ERROR",
+                )
+                await self._check_and_update_job_status(session, task.job_id)
             await session.commit()
         return ProcessingResult(
             status=TaskStatus.FAILED,
@@ -726,6 +850,18 @@ class DomainProcessor:
                     "message": error,
                     "retryable": category == "retryable",
                 }
+                log_event(
+                    logger,
+                    "domain_processing.failed",
+                    level=logging.WARNING if category == "retryable" else logging.ERROR,
+                    task_id=task_id,
+                    job_id=str(task.job_id) if task.job_id else None,
+                    domain_id=str(domain_id),
+                    error=error,
+                    error_category=category,
+                    error_code=error_code,
+                )
+                await self._check_and_update_job_status(session, task.job_id)
 
             # Conditionally deactivate domain
             if self._should_soft_deactivate(category, error_code):
@@ -755,6 +891,7 @@ class DomainProcessor:
             domain_repo = DomainRepository(session)
             task = await task_repo.get(uuid.UUID(task_id))
             if task is not None:
+                domain = await domain_repo.get(task.domain_id)
                 if task.attempts >= self._max_attempts:
                     task.status = TaskStatus.FAILED
                     task.lease_expires_at = None
@@ -764,8 +901,19 @@ class DomainProcessor:
                         "message": f"Task exceeded maximum attempts ({self._max_attempts}): {error}",
                         "retryable": False,
                     }
+                    log_event(
+                        logger,
+                        "domain_processing.max_attempts_exceeded",
+                        level=logging.WARNING,
+                        task_id=task_id,
+                        job_id=str(task.job_id) if task.job_id else None,
+                        domain_id=str(task.domain_id),
+                        domain=domain.normalized_domain if domain else None,
+                        attempt=task.attempts,
+                        max_attempts=self._max_attempts,
+                    )
+                    await self._check_and_update_job_status(session, task.job_id)
                     if self._should_soft_deactivate("transient", "MAX_ATTEMPTS_EXCEEDED"):
-                        domain = await domain_repo.get(task.domain_id)
                         if domain is not None and domain.is_active:
                             now = datetime.now(UTC)
                             domain.is_active = False
@@ -794,7 +942,22 @@ class DomainProcessor:
                     delay = min(base_delay * (2 ** (task.attempts - 1)), 3600)
                     import random
                     jitter = random.randint(0, 60)
-                    task.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay + jitter)
+                    retry_delay = delay + jitter
+                    task.next_attempt_at = datetime.now(UTC) + timedelta(seconds=retry_delay)
+
+                    log_event(
+                        logger,
+                        "domain_processing.rescheduled",
+                        level=logging.WARNING,
+                        task_id=task_id,
+                        job_id=str(task.job_id) if task.job_id else None,
+                        domain_id=str(task.domain_id),
+                        domain=domain.normalized_domain if domain else None,
+                        attempt=task.attempts,
+                        next_attempt_at=task.next_attempt_at.isoformat(),
+                        retry_delay_seconds=retry_delay,
+                        error=error,
+                    )
 
             await session.commit()
 

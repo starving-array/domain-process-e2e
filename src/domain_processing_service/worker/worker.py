@@ -220,14 +220,6 @@ class Worker:
 
     async def _run_loop(self, queue: BoundedQueue[Task]) -> None:
         """Main loop: consume tasks from queue and process them."""
-        log_event(
-            logger,
-            "worker.task_received",
-            level=logging.DEBUG,
-            worker_id=self._worker_id,
-            queue_size=queue.size,
-        )
-
         while self._running:
             try:
                 # Get a task from the queue (blocks until available)
@@ -242,15 +234,18 @@ class Worker:
                     level=logging.INFO,
                     worker_id=self._worker_id,
                     task_id=str(task.id),
-                    task_type=task.type.value,
                     job_id=str(task.job_id) if task.job_id else None,
+                    domain_id=str(task.domain_id) if getattr(task, "domain_id", None) else None,
+                    task_type=task.type.value,
+                    attempt=task.attempts,
                 )
 
                 # Process the task
-                await self._process_task(task)
-
-                # Mark the queue task as done
-                queue.task_done()
+                try:
+                    await self._process_task(task)
+                finally:
+                    # Mark the queue task as done
+                    queue.task_done()
 
             except asyncio.CancelledError:
                 raise
@@ -261,6 +256,7 @@ class Worker:
                     level=logging.ERROR,
                     worker_id=self._worker_id,
                     error=str(e),
+                    error_type=type(e).__name__,
                 )
                 # Continue processing other tasks
 
@@ -268,25 +264,33 @@ class Worker:
         """
         Process a single task.
 
-        For Phase 8, this mocks the processing by calling the task handler
-        which will mark the task as COMPLETED. Phase 9 will implement
-        the actual domain processing.
+        Phase 9 task handlers manage their own short-lived database sessions to avoid
+        holding PostgreSQL connections across external network I/O.
+        Legacy/mock handlers continue using a worker-managed database session.
         """
-        async with self._session_maker() as session:
-            try:
-                await self._task_handler(task, session)
-                await session.commit()
+        start_time = asyncio.get_event_loop().time()
+        if getattr(self._task_handler, "_attach_session_maker", None) is not None:
+            await self._task_handler(task, None)  # type: ignore[arg-type]
+        else:
+            async with self._session_maker() as session:
+                try:
+                    await self._task_handler(task, session)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    raise
 
-                log_event(
-                    logger,
-                    "worker.task_completed",
-                    level=logging.INFO,
-                    worker_id=self._worker_id,
-                    task_id=str(task.id),
-                )
-            except Exception:
-                await session.rollback()
-                raise
+        duration_ms = round((asyncio.get_event_loop().time() - start_time) * 1000, 2)
+        log_event(
+            logger,
+            "worker.task_completed",
+            level=logging.INFO,
+            worker_id=self._worker_id,
+            task_id=str(task.id),
+            job_id=str(task.job_id) if task.job_id else None,
+            domain_id=str(task.domain_id) if getattr(task, "domain_id", None) else None,
+            duration_ms=duration_ms,
+        )
 
 
 class WorkerPool:

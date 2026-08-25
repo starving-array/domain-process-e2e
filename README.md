@@ -1,132 +1,209 @@
 # Domain Processing Service
 
-An asynchronous, highly concurrent domain-processing service that accepts batches of domains, normalizes them, and processes them in the background (DNS resolution, IP validation/SSRF checks, and HTTP probing) with strict durability, idempotency, and concurrency controls.
+An asynchronous, highly concurrent backend service that ingests domain batches, executes safe asynchronous DNS resolution and HTTP probing, and manages domain observations with strict concurrency, idempotency, and durability guarantees.
 
 ---
 
-## Architecture & Engineering Highlights
+## Overview
 
-The service is designed around an async-first architecture with distinct responsibility boundaries:
+The **Domain Processing Service** solves the challenge of safely ingesting and processing large domain lists against slow, unpredictable external networks without starving database connection pools, inducing lock contention, or exposing internal networks to security vulnerabilities.
 
-- **PostgreSQL as Durable Source of Truth**: Stores `Job`, `Task`, `Domain`, `DomainDetail`, and `IdempotencyRecord` entities with strict relational integrity, UUID primary keys, and specialized composite indexes.
-- **Task Manager & Safe DB Polling**: Claims tasks using `SELECT ... FOR UPDATE SKIP LOCKED`, preventing lock contention across horizontal instances without worker lock overhead.
-- **Bounded In-Memory Worker Queue**: Dispatches claimed tasks to an async worker pool via a bounded memory queue (`BoundedQueue`), providing natural backpressure and memory protection.
-- **Workers Never Poll PostgreSQL Directly**: Workers consume exclusively from the in-memory bounded queue, keeping database query load decoupled from worker concurrency.
-- **Short-Lived Worker Database Sessions**: Workers open short-lived database sessions strictly for status transitions and release PostgreSQL connections back to the pool before executing slow external I/O (DNS queries and HTTP probing), preventing DB pool exhaustion under heavy concurrent load.
-- **Redis DomainLockManager Singleton**: Coordinates concurrent domain processing using Redis distributed locking with an application-level singleton client lifecycle (zero per-task client allocations).
-- **Post-Lock Double-Check & Detail Reuse**: After acquiring a domain lock, workers verify whether another worker completed processing for that domain during the wait window. Fresh `DomainDetail` records (within the freshness window) bypass redundant external network calls.
-- **Batch Insertion & N+1 Prevention**: `POST /jobs` resolves existing domains in bulk, creates missing domains in a single batch, and inserts all tasks in one transaction, completely eliminating N+1 database queries.
-- **Idempotency Engine**: Supports `Idempotency-Key` (scoped by `X-Client-ID`) with SHA-256 payload hashing. Replaying the same payload returns `200 OK` with the existing `jobId`; sending a different payload with the same key returns `409 Conflict`.
-- **Optimistic Concurrency Control (OCC)**: Protects `DomainDetail` against lost updates via atomic version increments (`version = version + 1`) and stale-write rejections.
-- **Exponential Backoff & Lease Recovery**: Transient failures trigger exponential backoff with jitter. A background lease recovery loop in the Task Manager safely identifies expired processing leases and resets tasks to `PENDING`.
-- **Soft Deactivation & Background Refresh**: Domains that fail persistently across maximum retry attempts are softly deactivated. A refresh scheduler identifies domains due for background re-validation via `next_refresh_at`.
-- **DNS-First SSRF Protection**: Resolves A and AAAA DNS records and strictly validates target IP addresses against private (RFC 1918), loopback (127.0.0.0/8, ::1), link-local, multicast, and reserved ranges before initiating HTTP connections.
-- **Structured JSON Logging & Observability**: Every request is tagged with a `request_id` correlation header and logged in structured JSON format with latency tracking and log level controls.
-- **Graceful Shutdown**: Handles shutdown signals (`SIGTERM`/lifespan context) by stopping task claiming, draining in-flight worker queue items, and cleanly closing database and Redis connection pools.
+### Primary Workflow
+1. **Ingestion**: Clients submit domain batches via `POST /jobs`, receiving an immediate `202 Accepted` response with a tracking `jobId`.
+2. **Persistence & Deduplication**: Domains are normalized, deduplicated, and persisted atomically alongside pending tasks in PostgreSQL in constant time (no N+1 queries).
+3. **Safe Orchestration**: A background `TaskManager` claims batches using `SELECT ... FOR UPDATE SKIP LOCKED` and feeds an in-memory `BoundedQueue`.
+4. **Decoupled Worker Processing**: A 50-coroutine worker pool dequeues tasks, coordinates concurrent domain probing via a Redis distributed lock (`DomainLockManager`), releases database connections during external network I/O, resolves DNS via `aiodns`, checks for SSRF prohibited IP ranges, probes HTTP/HTTPS endpoints, extracts page `<title>`s, and commits updates via Optimistic Concurrency Control (OCC).
+5. **Status & Result Retrieval**: Clients poll or paginate through task results using keyset cursor pagination via `GET /jobs/{job_id}`.
+
+### Target Consumers
+Security platforms, web crawlers, asset inventory services, and monitoring pipelines that need reliable, high-throughput domain metadata extraction.
 
 ---
 
-## Technology Stack
+## Key Features
 
-- **Language**: Python 3.10+ (tested on Python 3.10 through 3.14)
-- **Web Framework**: FastAPI, Starlette
-- **Data Validation & DTOs**: Pydantic v2, Pydantic-Settings
-- **Database & ORM**: PostgreSQL 15, SQLAlchemy 2.0 (AsyncIO), asyncpg
-- **Schema Migrations**: Alembic
-- **Distributed Locking / Coordination**: Redis 7, redis-py (asyncio)
-- **Testing**: Pytest, Pytest-AsyncIO, HTTPX
+- **Asynchronous Background Processing**: Immediate `202 Accepted` job ingestion decoupled from long-running network operations.
+- **Batch Job Ingestion & N+1 Prevention**: Bulk domain lookup, batch creation, and bulk task inserts execute in constant time.
+- **Keyset Cursor Pagination**: Deterministic `(created_at, id)` cursor pagination on `GET /jobs/{job_id}` scaling seamlessly to large task counts.
+- **Redis-Backed Domain Locking**: Distributed locks prevent redundant concurrent outbound requests for identical domains across workers.
+- **Post-Lock Double Check & Cache Reuse**: Automatically reuses fresh `DomainDetail` records without issuing redundant external requests.
+- **Short-Lived Worker DB Sessions**: Database connections are released back to the pool before slow external DNS/HTTP I/O, preventing connection pool exhaustion.
+- **Optimistic Concurrency Control (OCC)**: Version-based updates (`version = version + 1`) on `DomainDetail` prevent lost updates.
+- **Idempotency & Replay Protection**: `Idempotency-Key` (scoped by `X-Client-ID`) with SHA-256 payload hashing ensures safe request retries.
+- **Exponential Backoff & Transient Retry**: Intelligent transient error classification with exponential backoff and jitter.
+- **Lease Recovery Loop**: Automatically detects and reclaims abandoned or timed-out worker leases back to `PENDING`.
+- **Soft Deactivation & Background Refresh**: Softly deactivates domains after exceeding max attempts; periodic scheduler re-validates retained domains via `next_refresh_at`.
+- **DNS-First SSRF Protection**: Resolves A/AAAA records and strictly blocks requests to private (RFC 1918), loopback, link-local, multicast, and cloud metadata IPs.
+- **Bounded Memory Ingestion**: Caps HTTP response body reads to 50 KB and streaming parses `<title>` tags to protect memory.
+- **Partial Job Completion**: Failed individual tasks do not fail the overall job; jobs transition to `COMPLETED` when all tasks are terminal.
+- **Structured JSON Logging & Correlation IDs**: Every log is formatted as JSON with bound `request_id` and timing metadata.
+- **Health & Metrics Probes**: `/health/live`, `/health/ready` (DB verification), and `/metrics` (Prometheus registry).
+- **Graceful Shutdown**: Controlled draining of the bounded worker queue and clean disposal of database and Redis pools.
 
 ---
 
-## Prerequisites
+## Tech Stack
 
-- **Python**: 3.10 or newer
-- **Docker & Docker Compose**: For containerized PostgreSQL and Redis
-- **pip** (or `uv` / `poetry` for environment management)
+| Component | Technology | Version | Purpose |
+|---|---|---|---|
+| **Language** | Python | `>=3.11` | Async-first application runtime |
+| **Web Framework** | FastAPI / Starlette | `>=0.100.0` | Async REST API framework |
+| **ASGI Server** | Uvicorn | `>=0.23.0` | High-performance ASGI web server |
+| **Database** | PostgreSQL | `15-alpine` | Primary durable data store |
+| **Database Driver & ORM** | SQLAlchemy / asyncpg | `>=2.0.0` / `>=0.28.0` | Async relational ORM and connection pooling |
+| **Schema Migrations** | Alembic | `>=1.11.0` | Relational schema versioning |
+| **Coordination & Locking** | Redis / redis-py | `7-alpine` / `>=5.0.0` | Distributed domain locking store |
+| **HTTP Client & DNS** | HTTPX / aiodns | `>=0.24.0` / `>=3.0.0` | Outbound HTTP probing and asynchronous DNS resolution |
+| **Validation & DTOs** | Pydantic / Pydantic-Settings | `>=2.0.0` | Request validation and environment configuration |
+| **Testing** | Pytest / Pytest-AsyncIO | `>=7.4.0` / `>=0.21.1` | Unit, concurrency, and integration testing |
 
 ---
 
-## Local Infrastructure (Docker Compose)
+## Architecture Summary
 
-Start the required PostgreSQL and Redis services using Docker Compose:
+```
+Client  -->  FastAPI  -->  PostgreSQL (State & Tasks) + Redis (Locks)
+                              ^
+                              | (SKIP LOCKED claim)
+                         Task Manager  -->  BoundedQueue  -->  Workers (DNS / SSRF / HTTP)
+```
 
+For complete architecture diagrams, concurrency patterns, and design decisions, see:
+👉 **[Detailed Architecture & System Design](./ARCHITECTURE.md)**
+
+---
+
+## Quick Start (Fresh Clone Path)
+
+Follow these step-by-step instructions to run the service from a fresh clone:
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/starving-array/domain-process-e2e.git
+cd domain-process-e2e
+```
+
+### 2. Start Infrastructure (PostgreSQL 15 & Redis 7)
 ```bash
 docker compose up -d
 ```
+Verify containers are running and healthy:
+```bash
+docker compose ps
+```
 
-This starts:
-- **db**: PostgreSQL 15 on port `5432` with a `pg_isready` healthcheck and `postgres_data` persistent volume.
-- **redis**: Redis 7 on port `6379` with a `redis-cli ping` healthcheck and `redis_data` persistent volume.
+### 3. Create & Activate Virtual Environment
+
+**Windows (PowerShell):**
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+```
+
+**Linux / macOS:**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### 4. Install Dependencies
+```bash
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"
+```
+
+### 5. Apply Database Migrations
+```bash
+python -m alembic upgrade head
+```
+
+### 6. Start the Application
+```bash
+python -m uvicorn src.domain_processing_service.main:app --host 0.0.0.0 --port 8000
+```
 
 ---
 
-## Local Setup & Application Startup
+## Verifying the Service & API Examples
 
-1. **Install Dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+### 1. Health & Metrics Probes
 
-2. **Apply Database Migrations:**
-   ```bash
-   alembic upgrade head
-   ```
-
-3. **Start the Application:**
-   Run the service from the repository root using `uvicorn`:
-   ```bash
-   python -m uvicorn src.domain_processing_service.main:app --host 0.0.0.0 --port 8000
-   ```
-   *(FastAPI automatically starts the background TaskManager coordinator and WorkerPool on startup).*
-
----
-
-## Available API Endpoints
-
-### Core Endpoints
-
-#### 1. Submit a Job
-`POST /jobs`
-
-Accepts a list of domains for asynchronous processing.
-
-**Headers (Optional):**
-- `Idempotency-Key`: Client-provided key for safe retries.
-- `X-Client-ID`: Client identifier to scope the idempotency key.
-
-**Request Body:**
+**Liveness Probe:**
+```bash
+curl http://localhost:8000/health/live
+```
+*Expected Response (200 OK):*
 ```json
 {
-  "domains": ["example.com", "google.com", "github.com"]
+  "status": "live",
+  "service": "domain-processing-service",
+  "request_id": "req-..."
 }
 ```
 
-**Response (`202 Accepted` on new job, `200 OK` on idempotent replay):**
+**Readiness Probe (Verifies PostgreSQL connectivity):**
+```bash
+curl http://localhost:8000/health/ready
+```
+*Expected Response (200 OK):*
 ```json
 {
-  "jobId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "status": "ready",
+  "service": "domain-processing-service",
+  "dependencies": {
+    "postgresql": "ok"
+  },
+  "request_id": "req-..."
+}
+```
+
+**Prometheus Metrics:**
+```bash
+curl http://localhost:8000/metrics
+```
+
+---
+
+### 2. Submit a Domain Processing Job (`POST /jobs`)
+
+Submit a batch of domains for asynchronous processing. You can optionally supply `Idempotency-Key` and `X-Client-ID` headers to guarantee idempotent submission:
+
+```bash
+curl -X POST http://localhost:8000/jobs \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: sample-batch-20260825-01" \
+  -H "X-Client-ID: client-audit-01" \
+  -d '{
+    "domains": [
+      "python.org",
+      "cloudflare.com",
+      "example.invalid"
+    ]
+  }'
+```
+
+*Expected Response (`202 Accepted` on new job submission, or `200 OK` on idempotent replay):*
+```json
+{
+  "jobId": "df39d501-8eaa-4e8b-826e-4861084fe2e4",
   "status": "PENDING"
 }
 ```
 
-**Conflict Response (`409 Conflict`):**
-Returned if the same `Idempotency-Key` is reused with a different payload.
-
 ---
 
-#### 2. Get Job Status & Paginated Results
-`GET /jobs/{job_id}`
+### 3. Retrieve Job Status & Results (`GET /jobs/{job_id}`)
 
-Retrieves job progress summary and task results.
+Domain processing is asynchronous. Clients should poll `GET /jobs/{job_id}` until the job reaches a terminal state (`COMPLETED`):
 
-**Query Parameters:**
-- `limit` (optional, default: `100`, max: `1000`): Maximum task records per page.
-- `cursor` (optional): Base64-encoded pagination cursor for next page.
+```bash
+curl http://localhost:8000/jobs/df39d501-8eaa-4e8b-826e-4861084fe2e4
+```
 
-**Response (`200 OK`):**
+*Expected Response (`200 OK`):*
 ```json
 {
-  "jobId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "jobId": "df39d501-8eaa-4e8b-826e-4861084fe2e4",
   "status": "COMPLETED",
   "summary": {
     "total": 3,
@@ -137,13 +214,20 @@ Retrieves job progress summary and task results.
   },
   "results": [
     {
-      "taskId": "a1b2c3d4-0000-0000-0000-000000000001",
-      "domain": "example.com",
+      "taskId": "5dee1183-2ce4-45df-a7b3-db44675a3a6b",
+      "domain": "python.org",
       "status": "COMPLETED",
       "attempts": 1,
       "domainDetails": {
-        "dns": { "a_records": ["93.184.216.34"], "aaaa_records": [] },
-        "http": { "status_code": 200, "final_url": "https://example.com" }
+        "dns": {
+          "a_records": ["151.101.192.223", "151.101.128.223", "151.101.64.223", "151.101.0.223"],
+          "aaaa_records": ["2a04:4e42:600::223", "2a04:4e42:400::223", "2a04:4e42::223", "2a04:4e42:200::223"]
+        },
+        "http": {
+          "status_code": 301,
+          "response_time_ms": 54,
+          "page_title": null
+        }
       },
       "error": null
     }
@@ -154,70 +238,33 @@ Retrieves job progress summary and task results.
 
 ---
 
-### Observability Endpoints
+## Running the Automated Test Suite
 
-- `GET /health/live`: Liveness probe. Returns `200 OK` with JSON `{"status": "live", "service": "domain-processing-service", "request_id": "..."}`.
-- `GET /health/ready`: Readiness probe. Verifies PostgreSQL connectivity. Returns `200 OK` when healthy, or `503 Service Unavailable` if database connection fails.
-- `GET /metrics`: Prometheus metrics registry endpoint.
+Execute the full automated test suite covering unit, integration, migration, concurrency, idempotency, OCC, DNS, HTTP, worker, and end-to-end tests:
 
----
-
-## Running the Test Suite
-
-The test suite contains 183 automated tests covering normalization, database migrations, repository transactions, task management, worker execution, idempotency, OCC, and end-to-end integration flows.
-
-### Full Test Suite (Primary Verification)
 ```bash
 python -m pytest -q
 ```
 
-### Focused Test Suites
+To run focused concurrency and end-to-end suites:
 ```bash
-# E2E integration & concurrency tests
 python -m pytest tests/test_phase14.py -v
-
-# Idempotency, OCC, and soft deactivation tests
-python -m pytest tests/test_phase12.py -v
-
-# TaskManager & SKIP LOCKED claiming tests
-python -m pytest tests/test_manager.py -v
-
-# Database schema migrations apply/rollback tests
-python -m pytest tests/test_migrations.py -v
 ```
 
 ---
 
-## Configuration Reference
+## DNS Resolver Configuration
 
-Configuration is managed via environment variables prefixed with `DOMAIN_PROCESSING_` (or loaded from a local `.env` file):
+- **Code Default:** `AppSettings.dns_nameservers` defaults in code to `["8.8.8.8", "1.1.1.1", "8.8.4.4"]`.
+- **Runtime Environment Override:** The resolver nameservers can be overridden via the `DOMAIN_PROCESSING_DNS_NAMESERVERS` environment variable using a comma-separated list (e.g. `DOMAIN_PROCESSING_DNS_NAMESERVERS="8.8.8.8,1.1.1.1"`).
+- **Resolver Construction:** The application passes these configured nameservers directly into `aiodns.DNSResolver(nameservers=...)`.
 
-| Environment Variable | Purpose | Type | Default | Required | Example |
-|---|---|---|---|:---:|---|
-| `DOMAIN_PROCESSING_DATABASE_URL` | PostgreSQL connection URL (asyncpg) | `str` | `postgresql+asyncpg://user:password@localhost:5432/domain_processing` | No | `postgresql+asyncpg://user:pass@db:5432/domain_processing` |
-| `DOMAIN_PROCESSING_DB_POOL_SIZE` | SQLAlchemy connection pool size | `int` | `5` | No | `10` |
-| `DOMAIN_PROCESSING_DB_MAX_OVERFLOW` | Maximum overflow connections beyond pool size | `int` | `10` | No | `20` |
-| `DOMAIN_PROCESSING_DB_POOL_TIMEOUT_SECONDS` | Timeout for acquiring connection from pool | `float` | `5.0` | No | `10.0` |
-| `DOMAIN_PROCESSING_REDIS_HOST` | Redis server hostname | `str` | `localhost` | No | `redis` |
-| `DOMAIN_PROCESSING_REDIS_PORT` | Redis server port | `int` | `6379` | No | `6379` |
-| `DOMAIN_PROCESSING_REDIS_PASSWORD` | Redis authentication password | `str` | `None` | No | `secret` |
-| `DOMAIN_PROCESSING_REDIS_DB` | Redis database number | `int` | `0` | No | `0` |
-| `DOMAIN_PROCESSING_WORKER_CONCURRENCY` | Number of concurrent worker coroutines | `int` | `50` | No | `25` |
-| `DOMAIN_PROCESSING_WORKER_QUEUE_CAPACITY` | In-memory bounded queue capacity | `int` | `100` | No | `200` |
-| `DOMAIN_PROCESSING_TASK_LEASE_SECONDS` | Duration of task processing lease | `int` | `120` | No | `60` |
-| `DOMAIN_PROCESSING_MAX_ATTEMPTS` | Maximum retry attempts before terminal failure | `int` | `3` | No | `5` |
-| `DOMAIN_PROCESSING_MAX_DOMAINS_PER_REQUEST` | Maximum domain count in single `POST /jobs` | `int` | `1000` | No | `500` |
-| `DOMAIN_PROCESSING_DEFAULT_PAGE_SIZE` | Default page size for `GET /jobs/{id}` | `int` | `100` | No | `50` |
-| `DOMAIN_PROCESSING_MAX_PAGE_SIZE` | Maximum allowed page size for `GET /jobs/{id}` | `int` | `1000` | No | `500` |
-| `DOMAIN_PROCESSING_DNS_TIMEOUT_SECONDS` | Timeout for DNS resolution (A/AAAA) | `float` | `3.0` | No | `5.0` |
-| `DOMAIN_PROCESSING_CONNECT_TIMEOUT_SECONDS` | TCP connection timeout for HTTP probing | `float` | `5.0` | No | `5.0` |
-| `DOMAIN_PROCESSING_TLS_TIMEOUT_SECONDS` | TLS handshake timeout | `float` | `5.0` | No | `5.0` |
-| `DOMAIN_PROCESSING_READ_TIMEOUT_SECONDS` | HTTP read response timeout | `float` | `10.0` | No | `5.0` |
-| `DOMAIN_PROCESSING_TOTAL_PROCESSING_TIMEOUT_SECONDS` | Total timeout per task execution | `float` | `20.0` | No | `15.0` |
-| `DOMAIN_PROCESSING_MAX_RESPONSE_READ_BYTES` | Maximum HTTP body bytes read into memory | `int` | `51200` (50 KB) | No | `10240` |
-| `DOMAIN_PROCESSING_DOMAIN_DETAIL_FRESHNESS_SECONDS` | Window where cached domain details are reused | `int` | `86400` (24 hr) | No | `43200` |
-| `DOMAIN_PROCESSING_REFRESH_INTERVAL_SECONDS` | Interval after which domain is scheduled for refresh | `int` | `1209600` (14 days) | No | `604800` |
-| `DOMAIN_PROCESSING_SHUTDOWN_GRACE_SECONDS` | Grace period for worker draining on shutdown | `int` | `30` | No | `15` |
-| `DOMAIN_PROCESSING_LOG_LEVEL` | Application logging level | `str` | `INFO` | No | `DEBUG` |
-| `DOMAIN_PROCESSING_ENVIRONMENT` | Environment name (`local`, `production`, etc.) | `str` | `local` | No | `production` |
-| `DOMAIN_PROCESSING_APP_NAME` | Service application name | `str` | `domain-processing-service` | No | `domain-service` |
+---
+
+## Documentation Index
+
+The following root-level documentation files are available in this repository:
+
+- 📘 **[Architecture & System Design](./ARCHITECTURE.md)** — Detailed component design, data models, concurrency controls, and SSRF security.
+- 🛠️ **[Setup & Developer Guide](./SETUP.md)** — Comprehensive installation guide, Docker configuration, troubleshooting, and full 27-variable configuration reference.
+- 📋 **[Engineering Test & Validation Report](./TEST-VALIDATION-REPORT.md)** — Comprehensive evidence-based validation report covering automated test suites, unmocked DNS resolution, HTTP redirect observation, database persistence proofs, and environment isolation.

@@ -25,7 +25,6 @@ LogEventName = Literal[
     "database.migration.failed",
     "request.received",
     "request.validated",
-    "request.completed",
     "domain.normalization.started",
     "domain.normalized",
     "domain.validation.failed",
@@ -65,16 +64,32 @@ LogEventName = Literal[
     "domain_processing.lock_contention",
     "domain_processing.fresh_after_lock",
     "domain_processing.lock_acquired",
+    "domain_processing.dns_started",
+    "domain_processing.dns_succeeded",
     "domain_processing.dns_resolved",
     "domain_processing.dns_permanent_failure",
     "domain_processing.dns_transient_failure",
     "domain_processing.ssrf_rejected",
     "domain_processing.ip_validated",
+    "domain_processing.http_started",
+    "domain_processing.http_succeeded",
     "domain_processing.http_completed",
     "domain_processing.http_transient_failure",
     "domain_processing.http_permanent_failure",
-    "domain_processing.http_completed",
     "domain_processing.completed",
+    "domain_processing.failed",
+    "domain_processing.rescheduled",
+    "domain_processing.max_attempts_exceeded",
+    "dns.record_lookup_failed",
+    "domain_lock.acquired",
+    "domain_lock.released",
+    "domain_lock.failed",
+    "domain_lock.release_failed",
+    "http_client.probe_completed",
+    "http_client.probe_failed",
+    "ip_validator.rejected",
+    "redis.connection_failed",
+    "redis.close_failed",
     "scheduler.started",
     "scheduler.stopped",
     "scheduler.tick_started",
@@ -131,6 +146,7 @@ _LOG_RECORD_RESERVED = {
     "processName",
     "relativeCreated",
     "stack_info",
+    "taskName",
     "thread",
     "threadName",
 }
@@ -138,17 +154,25 @@ _LOG_RECORD_RESERVED = {
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        event = getattr(record, "event", record.getMessage())
+        request_id = getattr(record, "request_id", None)
+        if not request_id:
+            request_id = request_id_context.get()
+
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "event": getattr(record, "event", record.getMessage()),
-            "request_id": getattr(record, "request_id", None),
+            "event": event,
         }
+
+        if request_id:
+            payload["request_id"] = request_id
 
         for key, value in record.__dict__.items():
             if key not in _LOG_RECORD_RESERVED and key not in payload:
-                payload[key] = value
+                if value is not None:
+                    payload[key] = value
 
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)

@@ -29,3 +29,26 @@ def test_settings_reject_invalid_bounds() -> None:
 def test_settings_rejects_max_page_size_below_default() -> None:
     with pytest.raises(ValidationError):
         AppSettings(default_page_size=50, max_page_size=25)
+
+
+def test_safety_guard_rejects_protected_databases() -> None:
+    from tests.conftest import assert_safe_test_database_url
+
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*protected database 'domain_processing'"):
+        assert_safe_test_database_url("postgresql://user:password@localhost:5432/domain_processing")
+
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*protected database 'postgres'"):
+        assert_safe_test_database_url("postgresql://user:password@localhost:5432/postgres")
+
+    with pytest.raises(RuntimeError, match="SAFETY VIOLATION.*Database URL cannot be empty"):
+        assert_safe_test_database_url("")
+
+
+def test_safety_guard_accepts_isolated_test_databases() -> None:
+    from tests.conftest import assert_safe_test_database_url
+
+    # Should not raise
+    assert_safe_test_database_url("postgresql+psycopg2://user:password@localhost:5432/domain_processing_test")
+    assert_safe_test_database_url("postgresql+asyncpg://user:password@localhost:5432/domain_processing_test")
+    assert_safe_test_database_url("postgresql://localhost/test_analytics")
+

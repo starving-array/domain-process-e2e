@@ -108,6 +108,9 @@ async def create_pending_tasks(
 # Fixtures
 # ============================================================================
 
+from tests.conftest import get_test_async_database_url
+
+
 @pytest.fixture
 async def test_session_maker(async_engine):
     """Create a session maker for the test using the shared engine."""
@@ -118,14 +121,16 @@ async def test_session_maker(async_engine):
 
 @pytest.fixture
 async def test_settings() -> AppSettings:
-    """Create test settings."""
-    return AppSettings(
-        database_url="postgresql+asyncpg://user:password@localhost:5432/domain_processing",
+    """Create test settings pointing to test DB and Redis DB 1."""
+    settings = AppSettings(
+        database_url=get_test_async_database_url(),
         worker_concurrency=5,
         worker_queue_capacity=10,
         task_lease_seconds=120,
         shutdown_grace_seconds=10,
     )
+    object.__setattr__(settings, "redis_db", 1)
+    return settings
 
 
 # ============================================================================
@@ -424,7 +429,8 @@ class TestIdempotencyConcurrency:
             async def _ping(self): pass
         
         test_database = TestDatabase(async_engine)
-        settings = AppSettings(database_url="postgresql+asyncpg://user:password@localhost:5432/domain_processing")
+        settings = AppSettings(database_url=get_test_async_database_url())
+        object.__setattr__(settings, "redis_db", 1)
         app = create_app(settings, test_database)
         
         transport = httpx.ASGITransport(app=app)

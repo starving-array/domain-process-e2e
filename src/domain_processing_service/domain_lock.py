@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Optional
 import redis.asyncio as redis
 
 from domain_processing_service.config import AppSettings
+from domain_processing_service.logging import log_event
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -80,7 +81,14 @@ class DomainLock:
             )
             acquired = bool(acquired_result)
         except Exception as e:
-            logger.error("Error acquiring domain lock for %s: %s", normalized_domain, e)
+            log_event(
+                logger,
+                "domain_lock.failed",
+                level=logging.ERROR,
+                domain=normalized_domain,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             error_msg = str(e)
             
         try:
@@ -93,7 +101,13 @@ class DomainLock:
                     error=error_msg,
                 )
             elif acquired:
-                logger.debug("Acquired domain lock for %s (token: %s)", normalized_domain, token)
+                log_event(
+                    logger,
+                    "domain_lock.acquired",
+                    level=logging.DEBUG,
+                    domain=normalized_domain,
+                    token=token,
+                )
                 yield LockContext(
                     lock=self,
                     domain=normalized_domain,
@@ -101,7 +115,13 @@ class DomainLock:
                     acquired=True,
                 )
             else:
-                logger.debug("Failed to acquire domain lock for %s (already held)", normalized_domain)
+                log_event(
+                    logger,
+                    "domain_lock.failed",
+                    level=logging.DEBUG,
+                    domain=normalized_domain,
+                    reason="already_held",
+                )
                 yield LockContext(
                     lock=self,
                     domain=normalized_domain,
@@ -142,16 +162,32 @@ class DomainLock:
                 lua_script, 1, f"lock:domain:{normalized_domain}", token
             )
             if result:
-                logger.debug("Released domain lock for %s (token: %s)", normalized_domain, token)
+                log_event(
+                    logger,
+                    "domain_lock.released",
+                    level=logging.DEBUG,
+                    domain=normalized_domain,
+                    token=token,
+                )
                 return True
             else:
-                logger.warning(
-                    "Failed to release domain lock for %s (token mismatch or expired)",
-                    normalized_domain
+                log_event(
+                    logger,
+                    "domain_lock.release_failed",
+                    level=logging.WARNING,
+                    domain=normalized_domain,
+                    reason="token_mismatch_or_expired",
                 )
                 return False
         except Exception as e:
-            logger.error("Error releasing domain lock for %s: %s", normalized_domain, e)
+            log_event(
+                logger,
+                "domain_lock.failed",
+                level=logging.ERROR,
+                domain=normalized_domain,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
             return False
 
 

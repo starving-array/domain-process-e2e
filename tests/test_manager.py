@@ -13,6 +13,9 @@ from domain_processing_service.models import Domain, Job, Task, TaskStatus, Task
 from domain_processing_service.repositories import TaskRepository
 
 
+from tests.conftest import get_test_async_database_url
+
+
 @pytest.fixture
 async def test_session_maker(async_engine):
     """Create a session maker for the test using the shared engine."""
@@ -23,13 +26,15 @@ async def test_session_maker(async_engine):
 
 @pytest.fixture
 async def test_settings() -> AppSettings:
-    """Create test settings."""
-    return AppSettings(
-        database_url="postgresql+asyncpg://user:password@localhost:5432/domain_processing",
+    """Create test settings pointing to test DB and Redis DB 1."""
+    settings = AppSettings(
+        database_url=get_test_async_database_url(),
         worker_concurrency=5,
         worker_queue_capacity=10,
         task_lease_seconds=120,
     )
+    object.__setattr__(settings, "redis_db", 1)
+    return settings
 
 
 async def create_pending_tasks(

@@ -103,7 +103,13 @@ def create_app(
         try:
             await domain_lock_manager.connect()
         except Exception as e:
-            logger.warning("Redis connection failed during startup: %s", e)
+            log_event(
+                logger,
+                "redis.connection_failed",
+                level=logging.WARNING,
+                error=str(e),
+                error_type=type(e).__name__,
+            )
 
         if worker_pool is not None:
             await worker_pool.start()
@@ -126,7 +132,13 @@ def create_app(
             try:
                 await domain_lock_manager.close()
             except Exception as e:
-                logger.warning("Redis close error during shutdown: %s", e)
+                log_event(
+                    logger,
+                    "redis.close_failed",
+                    level=logging.WARNING,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
 
     app = FastAPI(title=app_settings.app_name, lifespan=lifespan)
 

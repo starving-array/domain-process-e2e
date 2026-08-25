@@ -4,6 +4,8 @@ import ipaddress
 import logging
 from dataclasses import dataclass
 
+from domain_processing_service.logging import log_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +86,13 @@ class IpValidator:
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError as e:
-            logger.warning("Invalid IP address format: %s", ip_str)
+            log_event(
+                logger,
+                "ip_validator.rejected",
+                level=logging.WARNING,
+                ip=ip_str,
+                reason=f"Invalid IP address format: {e}",
+            )
             return IpValidationResult(
                 is_allowed=False,
                 ip=ip_str,
@@ -94,24 +102,33 @@ class IpValidator:
         # Check against blocked networks
         for network in self._blocked_networks:
             if ip in network:
-                logger.warning("IP %s rejected: matches blocked network %s", ip_str, network)
+                log_event(
+                    logger,
+                    "ip_validator.rejected",
+                    level=logging.WARNING,
+                    ip=ip_str,
+                    network=str(network),
+                    reason=f"IP blocked: matches restricted network {network}",
+                )
                 return IpValidationResult(
                     is_allowed=False,
                     ip=ip_str,
                     reason=f"IP blocked: matches restricted network {network}",
                 )
         
-# Check for IPv4-mapped IPv6 addresses
+        # Check for IPv4-mapped IPv6 addresses
         if ip.version == 6 and ip.ipv4_mapped:
             mapped = ip.ipv4_mapped
             for network in self._blocked_networks:
                 if network.version == 4 and mapped in network:
-                    logger.warning(
-                        "IPv6-mapped IPv4 address %s rejected: "
-                        "mapped IPv4 %s in blocked network %s",
-                        ip_str,
-                        mapped,
-                        network,
+                    log_event(
+                        logger,
+                        "ip_validator.rejected",
+                        level=logging.WARNING,
+                        ip=ip_str,
+                        mapped_ipv4=str(mapped),
+                        network=str(network),
+                        reason=f"IPv4-mapped address blocked: {network}",
                     )
                     return IpValidationResult(
                         is_allowed=False,

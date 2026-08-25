@@ -35,6 +35,10 @@ class AppSettings(BaseSettings):
     shutdown_grace_seconds: int = Field(default=30, ge=1)
 
     dns_timeout_seconds: float = Field(default=3.0, gt=0)
+    dns_nameservers: list[str] | str = Field(
+        default_factory=lambda: ["8.8.8.8", "1.1.1.1", "8.8.4.4"],
+        description="Upstream DNS nameservers for aiodns resolution",
+    )
     connect_timeout_seconds: float = Field(default=5.0, gt=0)
     tls_timeout_seconds: float = Field(default=5.0, gt=0)
     read_timeout_seconds: float = Field(default=10.0, gt=0)
@@ -44,6 +48,15 @@ class AppSettings(BaseSettings):
     domain_detail_freshness_seconds: int = Field(default=24 * 60 * 60, ge=1)
     refresh_interval_seconds: int = Field(default=14 * 24 * 60 * 60, ge=1)
     max_attempts: int = Field(default=3, ge=1)
+
+    @field_validator("dns_nameservers", mode="before")
+    @classmethod
+    def parse_dns_nameservers(cls, value: object) -> list[str]:
+        if isinstance(value, str):
+            return [s.strip() for s in value.split(",") if s.strip()]
+        if isinstance(value, (list, tuple)):
+            return [str(s).strip() for s in value if str(s).strip()]
+        return ["8.8.8.8", "1.1.1.1", "8.8.4.4"]
 
     @field_validator("database_url")
     @classmethod
