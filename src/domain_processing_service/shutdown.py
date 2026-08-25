@@ -77,11 +77,11 @@ class ShutdownCoordinator:
                 loop.add_signal_handler(
                     sig, lambda s=sig: asyncio.create_task(self._on_signal(s))  # type: ignore[misc]
                 )
-            except NotImplementedError:
-                # Windows doesn't support add_signal_handler for SIGTERM/SIGINT
-                # We'll rely on the lifespan context manager for cleanup
+            except (NotImplementedError, ValueError, RuntimeError) as e:
+                # Windows doesn't support add_signal_handler, and UNIX raises ValueError/RuntimeError
+                # if not running in the main thread (e.g., inside Starlette TestClient tests)
                 logger.warning(
-                    "Signal handler not supported on this platform for %s", sig
+                    "Signal handler not supported or cannot be installed in this context for %s: %s", sig, e
                 )
 
         _signal_handlers_installed = True

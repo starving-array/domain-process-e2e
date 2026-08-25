@@ -25,6 +25,11 @@ class AppSettings(BaseSettings):
     db_max_overflow: int = Field(default=10, ge=0)
     db_pool_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    redis_host: str = "localhost"
+    redis_port: int = Field(default=6379, ge=1)
+    redis_password: str | None = None
+    redis_db: int = Field(default=0, ge=0)
+
     max_domains_per_request: int = Field(default=1000, ge=1)
     default_page_size: int = Field(default=100, ge=1)
     max_page_size: int = Field(default=1000, ge=1)

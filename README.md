@@ -73,9 +73,48 @@ For complete architecture diagrams, concurrency patterns, and design decisions, 
 
 ---
 
-## Quick Start (Fresh Clone Path)
+## Quick Start — Docker
 
-Follow these step-by-step instructions to run the service from a fresh clone:
+The fastest way to run the complete stack. **No local Python installation required.**
+
+### 1. Clone & Start
+```bash
+git clone https://github.com/starving-array/domain-process-e2e.git
+cd domain-process-e2e
+docker compose --profile full up -d --build
+```
+
+### 2. Verify
+```bash
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health/ready
+```
+
+### 3. Inspect & Logs
+```bash
+docker compose --profile full ps
+docker compose logs -f app
+```
+
+### 4. Stop
+```bash
+docker compose --profile full down
+```
+
+### 5. Run Tests (Docker)
+```bash
+docker compose --profile test run --rm tests
+```
+
+> **Note:** The Docker quick start runs PostgreSQL, Redis, and the application entirely in containers. This is the easiest setup path but runs the complete stack in containers.
+
+---
+
+## Alternative — Manual Development Setup
+
+For developers who prefer running the application natively, or for lower-resource machines where only PostgreSQL and Redis run in containers while the application runs on the host.
+
+**Requires:** Python `>=3.11`
 
 ### 1. Clone the Repository
 ```bash
@@ -121,6 +160,8 @@ python -m alembic upgrade head
 ```bash
 python -m uvicorn src.domain_processing_service.main:app --host 0.0.0.0 --port 8000
 ```
+
+> **Note:** The manual setup avoids running the application itself inside Docker. PostgreSQL and Redis remain containerized, while the application runs natively with full debugger support.
 
 ---
 
@@ -171,12 +212,12 @@ Submit a batch of domains for asynchronous processing. You can optionally supply
 ```bash
 curl -X POST http://localhost:8000/jobs \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: sample-batch-20260825-01" \
-  -H "X-Client-ID: client-audit-01" \
+  -H "Idempotency-Key: sample-batch-01" \
+  -H "X-Client-ID: client-01" \
   -d '{
     "domains": [
-      "python.org",
-      "cloudflare.com",
+      "example.com",
+      "httpbin.org",
       "example.invalid"
     ]
   }'
@@ -185,7 +226,7 @@ curl -X POST http://localhost:8000/jobs \
 *Expected Response (`202 Accepted` on new job submission, or `200 OK` on idempotent replay):*
 ```json
 {
-  "jobId": "df39d501-8eaa-4e8b-826e-4861084fe2e4",
+  "jobId": "<job-id>",
   "status": "PENDING"
 }
 ```
@@ -197,13 +238,13 @@ curl -X POST http://localhost:8000/jobs \
 Domain processing is asynchronous. Clients should poll `GET /jobs/{job_id}` until the job reaches a terminal state (`COMPLETED`):
 
 ```bash
-curl http://localhost:8000/jobs/df39d501-8eaa-4e8b-826e-4861084fe2e4
+curl http://localhost:8000/jobs/<job-id>
 ```
 
 *Expected Response (`200 OK`):*
 ```json
 {
-  "jobId": "df39d501-8eaa-4e8b-826e-4861084fe2e4",
+  "jobId": "<job-id>",
   "status": "COMPLETED",
   "summary": {
     "total": 3,
@@ -214,19 +255,19 @@ curl http://localhost:8000/jobs/df39d501-8eaa-4e8b-826e-4861084fe2e4
   },
   "results": [
     {
-      "taskId": "5dee1183-2ce4-45df-a7b3-db44675a3a6b",
-      "domain": "python.org",
+      "taskId": "<task-id>",
+      "domain": "example.com",
       "status": "COMPLETED",
       "attempts": 1,
       "domainDetails": {
         "dns": {
-          "a_records": ["151.101.192.223", "151.101.128.223", "151.101.64.223", "151.101.0.223"],
-          "aaaa_records": ["2a04:4e42:600::223", "2a04:4e42:400::223", "2a04:4e42::223", "2a04:4e42:200::223"]
+          "a_records": ["..."],
+          "aaaa_records": ["..."]
         },
         "http": {
-          "status_code": 301,
+          "status_code": 200,
           "response_time_ms": 54,
-          "page_title": null
+          "page_title": "Example Domain"
         }
       },
       "error": null

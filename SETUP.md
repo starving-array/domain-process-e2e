@@ -1,12 +1,53 @@
 # Setup & Developer Run Guide
 
-This guide provides step-by-step instructions for provisioning local infrastructure, running database migrations, starting the Domain Processing Service, executing the test suite, and configuring environment variables.
+This guide provides two supported ways to run the Domain Processing Service:
+
+- **Option A — Docker Quick Start**: Run the complete stack in containers. No local Python required.
+- **Option B — Manual Development Setup**: Run the application natively with containerized PostgreSQL and Redis.
 
 ---
 
-## 1. Prerequisites
+## Option A — Docker Quick Start
 
-- **Python**: Version `3.11` or higher (verified with Python 3.11, 3.12, 3.13, 3.14).
+The fastest way to get started. Requires only **Docker & Docker Compose**.
+
+```bash
+git clone https://github.com/starving-array/domain-process-e2e.git
+cd domain-process-e2e
+docker compose --profile full up -d --build
+```
+
+Verify the service is running:
+```bash
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health/ready
+```
+
+Inspect containers and logs:
+```bash
+docker compose --profile full ps
+docker compose logs -f app
+```
+
+Run the test suite via Docker:
+```bash
+docker compose --profile test run --rm tests
+```
+
+Stop all containers:
+```bash
+docker compose --profile full down
+```
+
+> **Note:** The Docker quick start runs PostgreSQL, Redis, and the application entirely in containers. This is the easiest setup path but runs the complete stack in containers. The manual setup (Option B) is useful for lower-resource machines because PostgreSQL and Redis can remain containerized while the application runs natively.
+
+---
+
+## Option B — Manual Development Setup
+
+### 1. Prerequisites
+
+- **Python**: Version `>=3.11` (verified with Python 3.11, 3.12, 3.13, 3.14). Not required for Docker quick start.
 - **Docker & Docker Compose**: For containerized PostgreSQL 15 and Redis 7.
 - **Git**: For source control.
 - **pip** (or `uv` / `poetry`): For Python dependency management.
